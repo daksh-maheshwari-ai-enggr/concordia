@@ -10,171 +10,152 @@
 # distributed under the License is distributed on an "AS IS" BASIS,
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
-# limitations under the License. 
+# limitations under the License.
 
 
 """Groq language model wrapper following BaseGPTModel style."""
 
- 
-
 from collections.abc import Collection, Sequence
-from typing import Any, override,TYPE_CHECKING
+from typing import Any, override
 
 from concordia.language_model import language_model
 from concordia.utils.deprecated import measurements as measurements_lib
-
-if TYPE_CHECKING:
-    
-    from groq import Groq
-
-try:
-    from groq import Groq as _Groq
-except ImportError:
-    _Groq = None
-
-Groq = _Groq
+from groq import Groq
 
 
 _MAX_MULTIPLE_CHOICE_ATTEMPTS = 20
 
 
 class GroqModel(language_model.LanguageModel):
+  """Language Model that uses Groq API."""
 
-    def __init__(
-        self,
-        model_name: str,
-        api_key: str,
-        measurements: measurements_lib.Measurements | None = None,
-        channel: str = language_model.DEFAULT_STATS_CHANNEL,
-    ):
-        if Groq is None:
-            raise ImportError(
-                "Groq dependency not installed. Install with: pip install gdm-concordia[groq]"
-            )
+  def __init__(
+      self,
+      model_name: str,
+      api_key: str,
+      measurements: measurements_lib.Measurements | None = None,
+      channel: str = language_model.DEFAULT_STATS_CHANNEL,
+  ):
+    self._model_name = model_name
+    self._client = Groq(api_key=api_key)
+    self._measurements = measurements
+    self._channel = channel
 
-        self._model_name = model_name
-        self._client = Groq(api_key=api_key)
-        self._measurements = measurements
-        self._channel = channel
+  def _sample_text(
+      self,
+      prompt: str,
+      *,
+      max_tokens: int = language_model.DEFAULT_MAX_TOKENS,
+      terminators: Collection[str] = language_model.DEFAULT_TERMINATORS,
+      temperature: float = language_model.DEFAULT_TEMPERATURE,
+      top_p: float = language_model.DEFAULT_TOP_P,
+      timeout: float = language_model.DEFAULT_TIMEOUT_SECONDS,
+      seed: int | None = None,
+  ) -> str:
 
+    del terminators
 
-    def _sample_text(
-        self,
-        prompt: str,
-        *,
-        max_tokens: int = language_model.DEFAULT_MAX_TOKENS,
-        terminators: Collection[str] = language_model.DEFAULT_TERMINATORS,
-        temperature: float = language_model.DEFAULT_TEMPERATURE,
-        top_p: float = language_model.DEFAULT_TOP_P,
-        timeout: float = language_model.DEFAULT_TIMEOUT_SECONDS,
-        seed: int | None = None,
-    ) -> str:
+    messages = [
+        {
+            "role": "system",
+            "content": (
+                "You always continue sentences provided "
+                "by the user and you never repeat what "
+                "the user already said."
+            ),
+        },
+        {
+            "role": "user",
+            "content": "Question: Is Jake a turtle?\nAnswer: Jake is ",
+        },
+        {"role": "assistant", "content": "not a turtle."},
+        {
+            "role": "user",
+            "content": (
+                "Question: What is Priya doing right now?\nAnswer: "
+                "Priya is currently "
+            ),
+        },
+        {"role": "assistant", "content": "sleeping."},
+        {"role": "user", "content": prompt},
+    ]
 
-        del terminators
+    response = self._client.chat.completions.create(
+        model=self._model_name,
+        messages=messages,
+        temperature=temperature,
+        max_tokens=max_tokens,
+        top_p=top_p,
+        timeout=timeout,
+        seed=seed,
+    )
 
-        messages = [
-            {
-                "role": "system",
-                "content": (
-                    "You always continue sentences provided "
-                    "by the user and you never repeat what "
-                    "the user already said."
-                ),
-            },
-            {
-                "role": "user",
-                "content": "Question: Is Jake a turtle?\nAnswer: Jake is ",
-            },
-            {"role": "assistant", "content": "not a turtle."},
-            {
-                "role": "user",
-                "content": (
-                    "Question: What is Priya doing right now?\nAnswer: "
-                    "Priya is currently "
-                ),
-            },
-            {"role": "assistant", "content": "sleeping."},
-            {"role": "user", "content": prompt},
-        ]
+    text = response.choices[0].message.content
 
-        response = self._client.chat.completions.create(
-            model=self._model_name,
-            messages=messages,
-            temperature=temperature,
-            max_tokens=max_tokens,
-            top_p=top_p,
-            timeout=timeout,
-            seed=seed,
-        )
+    if self._measurements is not None:
+      self._measurements.publish_datum(
+          self._channel,
+          {"raw_text_length": len(text)},
+      )
 
-        text = response.choices[0].message.content
+    return text
 
-        if self._measurements is not None:
-            self._measurements.publish_datum(
-                self._channel,
-                {"raw_text_length": len(text)},
+  @override
+  def sample_text(
+      self,
+      prompt: str,
+      *,
+      max_tokens: int = language_model.DEFAULT_MAX_TOKENS,
+      terminators: Collection[str] = language_model.DEFAULT_TERMINATORS,
+      temperature: float = language_model.DEFAULT_TEMPERATURE,
+      top_p: float = language_model.DEFAULT_TOP_P,
+      top_k: int = language_model.DEFAULT_TOP_K,
+      timeout: float = language_model.DEFAULT_TIMEOUT_SECONDS,
+      seed: int | None = None,
+  ) -> str:
+    del top_k  # unused
 
-            )
+    return self._sample_text(
+        prompt=prompt,
+        max_tokens=max_tokens,
+        terminators=terminators,
+        temperature=temperature,
+        top_p=top_p,
+        timeout=timeout,
+        seed=seed,
+    )
 
+  @override
+  def sample_choice(
+      self,
+      prompt: str,
+      responses: Sequence[str],
+      *,
+      seed: int | None = None,
+  ) -> tuple[int, str, dict[str, Any]]:
 
-        return text
+    prompt = (
+        prompt
+        + "\nRespond EXACTLY with one of the following strings:\n"
+        + "\n".join(responses)
+        + "."
+    )
 
-    @override
-    def sample_text(
-        self,
-        prompt: str,
-        *,
-        max_tokens: int = language_model.DEFAULT_MAX_TOKENS,
-        terminators: Collection[str] = language_model.DEFAULT_TERMINATORS,
-        temperature: float = language_model.DEFAULT_TEMPERATURE,
-        top_p: float = language_model.DEFAULT_TOP_P,
-        top_k: int = language_model.DEFAULT_TOP_K,
-        timeout: float = language_model.DEFAULT_TIMEOUT_SECONDS,
-        seed: int | None = None,
-    ) -> str:
-        del top_k  # unused
+    answer = ""
+    for _ in range(_MAX_MULTIPLE_CHOICE_ATTEMPTS):
+      answer = self._sample_text(
+          prompt,
+          temperature=language_model.DEFAULT_TEMPERATURE,
+          seed=seed,
+      ).strip()
 
-        return self._sample_text(
-            prompt=prompt,
-            max_tokens=max_tokens,
-            terminators=terminators,
-            temperature=temperature,
-            top_p=top_p,
-            timeout=timeout,
-            seed=seed,
-        )
+      try:
+        idx = responses.index(answer)
+      except ValueError:
+        continue
+      else:
+        return idx, responses[idx], {}
 
-    @override
-    def sample_choice(
-        self,
-        prompt: str,
-        responses: Sequence[str],
-        *,
-        seed: int | None = None,
-    ) -> tuple[int, str, dict[str, Any]]:
-
-        prompt = (
-            prompt
-            + "\nRespond EXACTLY with one of the following strings:\n"
-            + "\n".join(responses)
-            + "."
-        )
-
-        answer = ""
-        for attempts in range(_MAX_MULTIPLE_CHOICE_ATTEMPTS):
-            answer = self._sample_text(
-                prompt,
-                temperature=language_model.DEFAULT_TEMPERATURE,
-                seed=seed,
-            ).strip()
-
-            try:
-                idx = responses.index(answer)
-            except ValueError:
-                continue
-            else:
-                return idx, responses[idx], {}
-
-        raise language_model.InvalidResponseError(
-            f"Too many multiple choice attempts. Last answer: {answer}"
-        )     
+    raise language_model.InvalidResponseError(
+        f"Too many multiple choice attempts. Last answer: {answer}"
+    )
